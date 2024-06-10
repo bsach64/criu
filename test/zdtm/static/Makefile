@@ -59,6 +59,7 @@ TST_NOFILE	:=				\
 		pthread00			\
 		pthread01			\
 		pthread02			\
+		pidfd_child			\
 		pthread_timers			\
 		pthread_timers_h		\
 		rseq00				\
