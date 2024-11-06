@@ -7,7 +7,6 @@
 #include "pstree.h"
 #include <stdlib.h>
 #include <sys/wait.h>
-#include <signal.h>
 #include "common/bug.h"
 #include "rst-malloc.h"
 
@@ -128,74 +127,6 @@ static int pidfd_open(pid_t pid, int flags)
 	return syscall(__NR_pidfd_open, pid, flags);
 }
 
-static int create_tmp_process(void)
-{
-	int tmp_process;
-	tmp_process = fork();
-	if (tmp_process < 0) {
-		pr_perror("Could not fork");
-		return -1;
-	} else if (tmp_process == 0) {
-		while(1)
-			sleep(1);
-	}
-	return tmp_process;
-}
-
-static int free_dead_pidfd(struct dead_pidfd *dead)
-{
-	int status;
-	sigset_t blockmask, oldmask;
-
-	/*
-	 * Block SIGCHLD to prevent interfering from sigchld_handler()
-	 * and to properly handle the tmp process termination without
-	 * a race condition. A similar approach is used in cr_system().
-	 */
-	sigemptyset(&oldmask);
-	sigemptyset(&blockmask);
-	sigaddset(&blockmask, SIGCHLD);
-	if (sigprocmask(SIG_BLOCK, &blockmask, &oldmask) == -1) {
-		pr_perror("Cannot set mask of blocked signals");
-		goto err;
-	}
-
-	if (kill(dead->pid, SIGKILL) < 0) {
-		pr_perror("Could not kill temporary process with pid: %d",
-		dead->pid);
-		goto err;
-	}
-
-	if (waitpid(dead->pid, &status, 0) != dead->pid) {
-		pr_perror("Could not wait on temporary process with pid: %d",
-		dead->pid);
-		goto err;
-	}
-
-	/* Restore the original signal mask after tmp process has terminated */
-	if (sigprocmask(SIG_SETMASK, &oldmask, NULL) == -1) {
-		pr_perror("Cannot clear blocked signals");
-		goto err;
-	}
-
-	if (!WIFSIGNALED(status)) {
-		pr_err("Expected temporary process to be terminated by a signal\n");
-		goto err;
-	}
-
-	if (WTERMSIG(status) != SIGKILL) {
-		pr_err("Expected temporary process to be terminated by SIGKILL\n");
-		goto err;
-	}
-
-	mutex_lock(dead_pidfd_hash_lock);
-	hlist_del(&dead->hash);
-	mutex_unlock(dead_pidfd_hash_lock);
-	return 0;
-err:
-	return -1;
-}
-
 static int open_one_pidfd(struct file_desc *d, int *new_fd)
 {
 	struct pidfd_info *info;
@@ -217,14 +148,8 @@ static int open_one_pidfd(struct file_desc *d, int *new_fd)
 
 	mutex_lock(&dead->pidfd_lock);
 	BUG_ON(dead->count == 0);
+	BUG_ON(dead->pid == 0);
 	dead->count--;
-	if (dead->pid == -1) {
-		dead->pid = create_tmp_process();
-		if (dead->pid < 0) {
-			mutex_unlock(&dead->pidfd_lock);
-			goto err_close;
-		}
-	}
 
 	pidfd = pidfd_open(dead->pid, info->pidfe->flags);
 	if (pidfd < 0) {
@@ -234,13 +159,11 @@ static int open_one_pidfd(struct file_desc *d, int *new_fd)
 	}
 
 	if (dead->count == 0) {
-		if (free_dead_pidfd(dead)) {
-			pr_err("Failed to delete dead_pidfd struct\n");
-			mutex_unlock(&dead->pidfd_lock);
-			close(pidfd);
-			goto err_close;
-		}
+		mutex_lock(dead_pidfd_hash_lock);
+		hlist_del(&dead->hash);
+		mutex_unlock(dead_pidfd_hash_lock);
 	}
+
 	mutex_unlock(&dead->pidfd_lock);
 
 out:
@@ -265,6 +188,7 @@ static int collect_one_pidfd(void *obj, ProtobufCMessage *msg, struct cr_img *i)
 {
 	struct dead_pidfd *dead;
 	struct pidfd_info *info = obj;
+	struct pstree_item *helper;
 
 	info->pidfe = pb_msg(msg, PidfdEntry);
 	pr_info_pidfd("Collected ", info->pidfe);
@@ -286,12 +210,36 @@ static int collect_one_pidfd(void *obj, ProtobufCMessage *msg, struct cr_img *i)
 		return -1;
 	}
 
+	dead->pid = get_free_pid();
+	if (dead->pid < 0) {
+		pr_err("Could not get pid for tmp process\n");
+		return -1;
+	}
+
+	helper = lookup_create_item(dead->pid);
+	if (!helper) {
+		pr_err("Could not create pstree helper for tmp process\n");
+		return -1;
+	}
+
+	helper->sid = root_item->sid;
+	helper->pgid = root_item->pgid;
+	helper->pid->ns[0].virt = dead->pid;
+	helper->parent = root_item;
+	helper->ids = root_item->ids;
+	if (init_pstree_helper(helper)) {
+		pr_err("Can't init helper\n");
+		return -1;
+	}
+
+	list_add_tail(&helper->sibling, &root_item->children);
+	pr_info("Added a helper (pid: %d) for restoring dead pidfd with ino: %d\n", vpid(helper), info->pidfe->ino);
+	
 	INIT_HLIST_NODE(&dead->hash);
 	dead->ino = info->pidfe->ino;
 	dead->count = 1;
-	dead->pid = -1;
 	mutex_init(&dead->pidfd_lock);
-
+	
 	mutex_lock(dead_pidfd_hash_lock);
 	hlist_add_head(&dead->hash, &dead_pidfd_hash[dead->ino % DEAD_PIDFD_HASH_SIZE]);
 	mutex_unlock(dead_pidfd_hash_lock);

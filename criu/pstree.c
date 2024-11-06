@@ -21,7 +21,7 @@
 #include "crtools.h"
 
 struct pstree_item *root_item;
-static struct rb_root pid_root_rb;
+struct rb_root pid_root_rb;
 
 void core_entry_free(CoreEntry *core)
 {
@@ -657,7 +657,7 @@ static int read_pstree_image(pid_t *pid_max)
 }
 
 #define RESERVED_PIDS 300
-static int get_free_pid(void)
+int get_free_pid(void)
 {
 	static struct pid *prev, *next;
 
