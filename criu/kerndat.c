@@ -1736,6 +1736,60 @@ static int kerndat_has_timer_cr_ids(void)
 	return 0;
 }
 
+static int kerndat_has_statmount(void)
+{
+	#define MNT_UNIQUE_ID_OFFSET (1ULL << 31)
+	size_t bufsize = 1 << 15;
+	struct _mnt_id_req req = {
+		.size = MNT_ID_REQ_SIZE_VER1,
+		.mnt_id = MNT_UNIQUE_ID_OFFSET + 1,
+		.param = STATMOUNT_MNT_BASIC,
+	};
+
+	struct _statmount *stmnt = malloc(bufsize);
+	if (!stmnt) {
+		pr_perror("malloc failed");
+		return -1;
+	}
+
+	if (syscall(__NR_statmount, &req, stmnt, bufsize, 0) == 0) {
+		kdat.has_statmount = true;
+		goto out;
+	} else if (errno == ENOENT) {
+		kdat.has_statmount = true;
+		goto out;
+	} else if (errno == ENOSYS) {
+		pr_info("statmount isn't supported\n");
+		kdat.has_statmount = false;
+		goto out;
+	} else {
+		free(stmnt);
+		pr_perror("unexpected error from statmount");
+		return -1;
+	}
+out:
+	free(stmnt);
+	return 0;
+}
+
+static int kerndat_has_statx(void)
+{
+	struct statx stat;
+	int dirfd = AT_FDCWD;
+	const char *pathname = ".";
+
+	if (statx(dirfd, pathname, 0, STATX_BASIC_STATS, &stat) == 0) {
+		kdat.has_statx = true;
+		return 0;
+	} else if (errno == ENOSYS) {
+		kdat.has_statx = false;
+		return 0;
+	}
+
+	pr_err("statx should not fail\n");
+	return -1;
+}
+
 static void breakpoint_func(void)
 {
 	if (raise(SIGSTOP))
@@ -2079,6 +2133,14 @@ int kerndat_init(void)
 	}
 	if (!ret && kerndat_breakpoints()) {
 		pr_err("kerndat_breakpoints has failed when initializing kerndat.\n");
+		ret = -1;
+	}
+	if (!ret && kerndat_has_statx()) {
+		pr_err("kerndat_has_statx failed when initializing kerndat.\n");
+		ret = -1;
+	}
+	if (!ret && kerndat_has_statmount()) {
+		pr_err("kerndat_has_statmount failed when initializing kerndat.\n");
 		ret = -1;
 	}
 
