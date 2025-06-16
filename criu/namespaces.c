@@ -1,3 +1,5 @@
+#include "common/lock.h"
+#include "log.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -40,6 +42,7 @@ static struct ns_desc *ns_desc_array[] = {
 	&user_ns_desc, &mnt_ns_desc, &time_ns_desc, &cgroup_ns_desc,
 };
 
+unsigned int fake_mnt_ns_id;
 static unsigned int join_ns_flags;
 
 static int collect_pid_namespaces(bool);
@@ -517,6 +520,64 @@ out:
 static unsigned int get_ns_id(int pid, struct ns_desc *nd, protobuf_c_boolean *supported)
 {
 	return __get_ns_id(pid, nd, supported, NULL);
+}
+
+
+unsigned int create_fake_mnt_ns(void)
+{
+	/* create a random process that just sleeps */
+	struct ns_id *nd;
+	unsigned int nsid;
+	futex_t *futex;
+	pid_t random_process;
+	pid_t result;
+	int status;
+
+	futex = shmalloc(sizeof(*futex));
+	if (!futex)
+		return 0;
+	futex_init(futex);
+	futex_inc(futex);
+	random_process = fork();
+	if (random_process < 0)
+		return 0;
+	if (random_process == 0) {
+		/* put this process in a new mount namespace */
+		if (unshare(CLONE_NEWNS)) {
+			futex_dec(futex);
+			return -1;
+		}
+		futex_dec(futex);
+		while(1)
+			sleep(1000);
+	} else {
+		futex_wait_until(futex, 1);
+		/* check whether child exited */
+		result = waitpid(random_process, &status, WNOHANG);
+		if (result < 0) {
+			return 0;
+		}
+
+		if (result != 0) {
+			/* child exited with error */
+			if (WIFEXITED(status) && WEXITSTATUS(status) == -1)
+				return 0;
+		}
+
+		nsid = get_ns_id(random_process, &mnt_ns_desc, NULL);
+		if (nsid == 0)
+			return 0;
+		fake_mnt_ns_id = nsid;
+		nd = lookup_ns_by_id(fake_mnt_ns_id, &mnt_ns_desc);
+		nd->type = NS_OTHER;
+
+		if (kill(random_process, SIGKILL))
+			return 0;
+
+		if (waitpid(random_process, NULL, 0) < 0)
+			return 0;
+		return nsid;
+	}
 }
 
 int dump_one_ns_file(int lfd, u32 id, const struct fd_parms *p)

@@ -115,6 +115,7 @@ struct mount_info {
 	struct list_head postpone;
 
 	int is_overmounted;
+	bool detached_mnt;
 
 	struct rst_mount_info *rmi;
 
@@ -124,6 +125,8 @@ struct mount_info {
 extern struct mount_info *mntinfo;
 
 extern void mntinfo_add_list_before(struct mount_info **head, struct mount_info *new);
+extern void mntinfo_add_list(struct mount_info *new);
+extern struct mount_info *mount_info_from_statmount(int lfd);
 
 /*
  * Put a : in here since those are invalid on

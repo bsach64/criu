@@ -1,3 +1,4 @@
+#include "log.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -15,10 +16,12 @@
 #include <elf.h>
 #include <linux/fiemap.h>
 #include <linux/fs.h>
-
+#include <inttypes.h>
 #include "tty.h"
 #include "stats.h"
+#include "filesystems.h"
 
+#include "common/bug.h"
 #ifndef SEEK_DATA
 #define SEEK_DATA 3
 #define SEEK_HOLE 4
@@ -1755,6 +1758,7 @@ static bool store_validation_data(RegFileEntry *rfe, const struct fd_parms *p, i
 	return true;
 }
 
+
 int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 {
 	struct fd_link _link, *link;
@@ -1787,12 +1791,15 @@ int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 		if (opts.shell_job && is_tty(p->stat.st_rdev, p->stat.st_dev)) {
 			skip_for_shell_job = true;
 		} else {
-			pr_err("Can't lookup mount=%d for fd=%d path=%s\n", p->mnt_id, p->fd, link->name + 1);
-			return -1;
+			if (!(kdat.has_statmount && (mi = mount_info_from_statmount(lfd)))) {
+				pr_err("Can't lookup mount=%d for fd=%d path=%s\n", p->mnt_id, p->fd, link->name + 1);
+				return -1;
+			}
 		}
 	}
 
-	if (!skip_for_shell_job && mnt_is_overmounted(mi)) {
+	/* skipping for detached */
+	if (!skip_for_shell_job && !mi->detached_mnt && mnt_is_overmounted(mi)) {
 		pr_err("Open files on overmounted mounts are not supported yet; mount=%d fd=%d path=%s\n",
 		       p->mnt_id, p->fd, link->name + 1);
 		return -1;
@@ -1813,7 +1820,8 @@ int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 		return -1;
 	}
 
-	if (!skip_for_shell_job && check_path_remap(link, p, lfd, id, mi->nsid))
+	/* skipping for detached */
+	if (!skip_for_shell_job && !mi->detached_mnt && check_path_remap(link, p, lfd, id, mi->nsid))
 		return -1;
 	rfe.name = &link->name[1];
 ext:

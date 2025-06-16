@@ -141,6 +141,7 @@ struct ns_id {
 	};
 };
 extern struct ns_id *ns_ids;
+extern unsigned int fake_mnt_ns_id;
 
 #define NS_DESC_ENTRY(_cflag, _str)                                    \
 	{                                                              \
@@ -153,6 +154,7 @@ extern struct ns_desc pid_ns_desc;
 extern struct ns_desc user_ns_desc;
 extern struct ns_desc time_ns_desc;
 extern unsigned long root_ns_mask;
+extern unsigned int create_fake_mnt_ns(void);
 
 extern const struct fdtype_ops nsfile_dump_ops;
 extern struct collect_image_info nsfile_cinfo;
