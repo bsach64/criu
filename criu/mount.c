@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -29,7 +30,6 @@
 #include "clone-noasan.h"
 #include "fdstore.h"
 #include "rst-malloc.h"
-
 #include "images/mnt.pb-c.h"
 
 #undef LOG_PREFIX
@@ -111,7 +111,7 @@ static char *ext_mount_lookup(char *key)
  */
 struct mount_info *mntinfo;
 
-static void mntinfo_add_list(struct mount_info *new)
+void mntinfo_add_list(struct mount_info *new)
 {
 	if (!mntinfo)
 		mntinfo = new;
@@ -994,6 +994,8 @@ static void __search_bindmounts(struct mount_info *mi)
 
 	for (t = mi->next; t; t = t->next) {
 		if (mounts_sb_equal(mi, t)) {
+			if (t->mnt_bind_is_populated)
+				continue;
 			list_add(&t->mnt_bind, &mi->mnt_bind);
 			t->mnt_bind_is_populated = true;
 			pr_debug("\t"
@@ -1009,8 +1011,9 @@ static void search_bindmounts(void)
 {
 	struct mount_info *mi;
 
-	for (mi = mntinfo; mi; mi = mi->next)
+	for (mi = mntinfo; mi; mi = mi->next) {
 		__search_bindmounts(mi);
+	}
 }
 
 struct mount_info *mnt_bind_pick(struct mount_info *mi, bool (*pick)(struct mount_info *mi, struct mount_info *bind))
@@ -1863,6 +1866,11 @@ static int dump_one_mountpoint(struct mount_info *pm, struct cr_img *img)
 		 * for reverse mapping details.
 		 */
 		me.ext_key = pm->external;
+
+	if (pm->detached_mnt) {
+		me.has_detached_mnt = true;
+		me.detached_mnt = pm->detached_mnt;
+	}
 	me.root = pm->root;
 
 	if (pb_write_one(img, &me, PB_MNT))
@@ -4032,9 +4040,12 @@ err:
 int dump_mnt_namespaces(void)
 {
 	struct ns_id *nsid;
+	struct mount_info *mi;
+	struct cr_img *img;
+	int ret = 0;
 
 	if (!(root_ns_mask & CLONE_NEWNS))
-		return 0;
+		goto out;
 
 	for (nsid = ns_ids; nsid != NULL; nsid = nsid->next) {
 		if (nsid->nd != &mnt_ns_desc || nsid->type == NS_CRIU)
@@ -4049,8 +4060,32 @@ int dump_mnt_namespaces(void)
 		if (dump_mnt_ns(nsid, nsid->mnt.mntinfo_list))
 			return -1;
 	}
+	return ret;
+out:
+	search_bindmounts();
+	nsid = lookup_ns_by_id(fake_mnt_ns_id, &mnt_ns_desc);
+	if (!nsid) {
+		pr_err("Could not find fake mnt ns for abstract mounts\n");
+		return -1;
+	}
 
-	return 0;
+	img = open_image(CR_FD_MNTS, O_DUMP, nsid->id);
+	if (!img) {
+		ret = -1;
+		goto err;
+	}
+	/* check for detached/abstract mounts */
+	for (mi = mntinfo; mi; mi = mi->next) {
+		if (mi->detached_mnt && dump_one_mountpoint(mi, img)) {
+			ret = -1;
+			close_image(img);
+			goto err;
+		}
+	}
+
+	close_image(img);
+err:
+	return ret;
 }
 
 void clean_cr_time_mounts(void)

@@ -1455,6 +1455,7 @@ static int parse_mountinfo_ent(char *str, struct mount_info *new, char **fsname)
 	char *sub, *opt = NULL;
 	char link_path[PATH_MAX];
 
+	new->detached_mnt = false;
 	new->mountpoint = xmalloc(PATH_MAX);
 	if (new->mountpoint == NULL)
 		goto err;

@@ -1,3 +1,4 @@
+#include "log.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -15,10 +16,14 @@
 #include <elf.h>
 #include <linux/fiemap.h>
 #include <linux/fs.h>
-
+#include <linux/mount.h>
+#include <inttypes.h>
 #include "tty.h"
 #include "stats.h"
+#include "mount-v2.h"
+#include "filesystems.h"
 
+#include "common/bug.h"
 #ifndef SEEK_DATA
 #define SEEK_DATA 3
 #define SEEK_HOLE 4
@@ -1755,6 +1760,138 @@ static bool store_validation_data(RegFileEntry *rfe, const struct fd_parms *p, i
 	return true;
 }
 
+static unsigned int parse_mnt_flags(unsigned int flags)
+{
+	unsigned int mount_flags = 0;
+	if (flags & MOUNT_ATTR_RDONLY)
+		flags |= MS_RDONLY;
+	if (flags & MOUNT_ATTR_NOSUID)
+		flags |= MS_NOSUID;
+	if (flags & MOUNT_ATTR_NODEV)
+		flags |= MS_NODEV;
+	if (flags & MOUNT_ATTR_NOEXEC)
+		flags |= MS_NOATIME;
+	if (flags & MOUNT_ATTR_NODIRATIME)
+		flags |= MS_NODIRATIME;
+	if (flags & MOUNT_ATTR_RELATIME)
+		flags |= MS_RELATIME;
+
+	return mount_flags;
+}
+
+static int statmount(struct mnt_id_req *req, struct statmount *stmnt, size_t bufsize, unsigned long flags)
+{
+	return syscall(__NR_statmount, req, stmnt, bufsize, flags);
+}
+
+struct mount_info* mount_info_from_statmount(int lfd)
+{
+	struct mount_info *mnt = mnt_entry_alloc(false);
+	cleanup_free struct statmount *statmnt;
+	size_t statmount_bufsize = 1 << 15;
+	size_t root_len, fs_len;
+	int ret;
+	struct ns_id *fake_ns;
+
+	struct mnt_id_req statmount_req = {
+		.size = MNT_ID_REQ_SIZE_VER2,
+		.param = STATMOUNT_MNT_BASIC | STATMOUNT_FS_TYPE |
+			STATMOUNT_SB_BASIC | STATMOUNT_PROPAGATE_FROM |
+			STATMOUNT_MNT_POINT | STATMOUNT_MNT_ROOT,
+		.fd = lfd
+	};
+
+	statmnt = xmalloc(statmount_bufsize);
+	if (!statmnt)
+		return NULL;
+
+	if (statmount(&statmount_req, statmnt, statmount_bufsize, STATMOUNT_FD)) {
+		pr_perror("could not call statmount on fd");
+		return NULL;
+	}
+
+	mnt->detached_mnt = true;
+	mnt->s_dev = MKKDEV(statmnt->sb_dev_major, statmnt->sb_dev_minor);
+	mnt->mnt_id = statmnt->mnt_id_old;
+	mnt->parent_mnt_id = statmnt->mnt_parent_id_old;
+
+	/* detached mount does not have a mountpoint */
+	/* parse flags */
+	mnt->flags = parse_mnt_flags(statmnt->mnt_attr) | statmnt->mnt_propagation;
+	mnt->sb_flags = statmnt->sb_flags;
+
+	if (mnt->flags & MS_SLAVE)
+		mnt->shared_id = statmnt->mnt_peer_group;
+	else if (mnt->flags & MS_SHARED)
+		mnt->master_id = statmnt->mnt_master;
+
+	mnt->mountpoint = NULL;
+
+	/* needed for mnt_is_overmounted */
+	mnt->parent = NULL;
+
+	fs_len = strlen(statmnt->str + statmnt->fs_type);
+	mnt->fsname = xmalloc(fs_len + 1);
+	if (!mnt->fsname) {
+		mnt_entry_free(mnt);
+		return NULL;
+	}
+
+	strncpy(mnt->fsname, statmnt->str + statmnt->fs_type, fs_len);
+
+	fake_ns = lookup_ns_by_id(fake_mnt_ns_id, &mnt_ns_desc);
+	if (!fake_ns) {
+		pr_err("Could not find fake mnt ns for detached mounts\n");
+		return NULL;
+	}
+
+	mnt->nsid = fake_ns;
+	mnt->fsname[fs_len] = 0;
+	mnt->fstype = find_fstype_by_name(mnt->fsname);
+	if (mnt->fstype->parse) {
+		ret = mnt->fstype->parse(mnt);
+		if (ret < 0) {
+			pr_err("Failed to parse FS specific data on %s\n", service_mountpoint(mnt));
+			mnt_entry_free(mnt);
+			mnt = NULL;
+			return NULL;
+		}
+
+		if (ret > 0) {
+			pr_info("\tskipping fs mounted at %s\n", service_mountpoint(mnt) + 1);
+			mnt_entry_free(mnt);
+			mnt = NULL;
+			return NULL;
+		}
+	}
+
+	root_len = strlen(statmnt->str + statmnt->mnt_root);
+	mnt->root = xmalloc(root_len + 1);
+	if (!mnt->root) {
+		mnt_entry_free(mnt);
+		return NULL;
+	}
+
+	strncpy(mnt->root, statmnt->str + statmnt->mnt_root, root_len);
+	mnt->root[root_len] = 0;
+
+	/*
+	 * TODO: keeping ns_mountpoint same as root for now,
+	 * do not know if it's the right approach
+	 */
+	mnt->ns_mountpoint = xmalloc(root_len + 2);
+	if (!mnt->ns_mountpoint) {
+		mnt_entry_free(mnt);
+		return NULL;
+	}
+
+	mnt->ns_mountpoint[0] = '.';
+	strncpy(mnt->ns_mountpoint + 1, mnt->root, root_len);
+	mnt->ns_mountpoint[root_len + 1] = 0;
+	mntinfo_add_list(mnt);
+	return mnt;
+}
+
 int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 {
 	struct fd_link _link, *link;
@@ -1787,12 +1924,15 @@ int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 		if (opts.shell_job && is_tty(p->stat.st_rdev, p->stat.st_dev)) {
 			skip_for_shell_job = true;
 		} else {
-			pr_err("Can't lookup mount=%d for fd=%d path=%s\n", p->mnt_id, p->fd, link->name + 1);
-			return -1;
+			if (!(kdat.has_statmount && (mi = mount_info_from_statmount(lfd)))) {
+				pr_err("Can't lookup mount=%d for fd=%d path=%s\n", p->mnt_id, p->fd, link->name + 1);
+				return -1;
+			}
 		}
 	}
 
-	if (!skip_for_shell_job && mnt_is_overmounted(mi)) {
+	/* skipping for detached */
+	if (!skip_for_shell_job && !mi->detached_mnt && mnt_is_overmounted(mi)) {
 		pr_err("Open files on overmounted mounts are not supported yet; mount=%d fd=%d path=%s\n",
 		       p->mnt_id, p->fd, link->name + 1);
 		return -1;
@@ -1813,7 +1953,8 @@ int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 		return -1;
 	}
 
-	if (!skip_for_shell_job && check_path_remap(link, p, lfd, id, mi->nsid))
+	/* skipping for detached */
+	if (!skip_for_shell_job && !mi->detached_mnt && check_path_remap(link, p, lfd, id, mi->nsid))
 		return -1;
 	rfe.name = &link->name[1];
 ext:

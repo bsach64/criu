@@ -1,3 +1,4 @@
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -2209,6 +2210,10 @@ int cr_dump_tasks(pid_t pid)
 
 	if (collect_namespaces(true) < 0)
 		goto err;
+
+	if (create_fake_mnt_ns() == 0) {
+		goto err;
+	}
 
 	glob_imgset = cr_glob_imgset_open(O_DUMP);
 	if (!glob_imgset)
