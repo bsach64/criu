@@ -1,0 +1,4 @@
+os.getenv("ZDTM_DETACHED_MNT") and \
+( lambda:
+{'flavor': 'ns', 'feature': 'mnt_id', "flags": "suid",
+} ) () or {'flags': 'noauto'}
