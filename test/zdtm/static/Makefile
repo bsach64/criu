@@ -385,6 +385,7 @@ TST_DIR		=				\
 		cwd01				\
 		cwd02				\
 		detached_mount                  \
+		detached_bind_mount		\
 		abstract_mount			\
 		overmount_dev			\
 		overmount_file			\
