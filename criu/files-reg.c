@@ -1,4 +1,5 @@
-#include "log.h"
+#include <linux/limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -2200,10 +2201,12 @@ int open_path(struct file_desc *d, int (*open_cb)(int mntns_root, struct reg_fil
 {
 	int tmp = -1, mntns_root, level = 0;
 	struct reg_file_info *rfi;
+	struct mount_info *mi;
 	char *orig_path = NULL;
 	char path[PATH_MAX];
 	int inh_fd = -1;
 	int ret;
+	char dot[] = ".";
 
 	if (inherited_fd(d, &tmp))
 		return tmp;
@@ -2269,6 +2272,21 @@ int open_path(struct file_desc *d, int (*open_cb)(int mntns_root, struct reg_fil
 	}
 
 	mntns_root = mntns_get_root_by_mnt_id(rfi->rfe->mnt_id);
+	mi = mnt_is_detached(rfi->rfe->mnt_id);
+
+	if (!mi)
+		goto ext;
+
+	if (strncmp(rfi->path, dot, strlen(dot)) == 0) {
+		rfi->path = mi->ns_mountpoint;
+	} else {
+		char* path = xmalloc(PATH_MAX);
+		if (!path)
+			goto err;
+
+		snprintf(path, PATH_MAX, "%s/%s", mi->ns_mountpoint, rfi->path);
+		rfi->path = path;
+	}
 ext:
 	tmp = open_cb(mntns_root, rfi, arg);
 	if (tmp < 0) {

@@ -111,6 +111,7 @@ struct mount_info {
 	struct list_head mnt_propagate;	 /* circular list of mounts which propagate from each other */
 	struct list_head mnt_notprop;	 /* temporary list used in can_mount_now */
 	struct list_head mnt_unbindable; /* list of mounts with delayed unbindable */
+	struct list_head mnt_detached_list;
 
 	struct list_head postpone;
 
@@ -235,8 +236,10 @@ extern int mount_root(void *args, int fd, pid_t pid);
 extern int restore_ext_mount(struct mount_info *mi);
 extern int cr_pivot_root(char *root);
 extern int print_ns_root(struct ns_id *ns, int remap_id, char *buf, int bs);
+extern struct mount_info* mnt_is_detached(int mnt_id);
 
 extern struct mount_info *root_yard_mp;
 extern char *mnt_roots;
+extern struct list_head detached_mounts;
 
 #endif /* __CR_MOUNT_H__ */

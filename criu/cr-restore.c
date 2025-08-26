@@ -1,3 +1,4 @@
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -2156,6 +2157,9 @@ skip_ns_bouncing:
 
 	ret = restore_switch_stage(CR_STATE_RESTORE_SIGCHLD);
 	if (ret < 0)
+		goto out_kill;
+
+	if (umount_detached_mountpoints())
 		goto out_kill;
 
 	ret = stop_usernsd();
