@@ -446,6 +446,9 @@ static int do_mount_root_v2(struct mount_info *mi)
 	unsigned long mflags = mi->flags & (~MS_PROPAGATE);
 	unsigned long flags = MS_BIND;
 	int fd;
+	struct mount_info *detached;
+	char *rel_path;
+	char mountpoint[PATH_MAX];
 
 	if (root_ns_mask & CLONE_NEWUSER) {
 		fd = open(mi->plain_mountpoint, O_PATH);
@@ -484,6 +487,27 @@ static int do_mount_root_v2(struct mount_info *mi)
 	}
 
 	mi->mounted = true;
+
+	/* create temporary dirs for detached mounts */
+	list_for_each_entry(detached, &mi->children, siblings) {
+		if (!detached->detached_mnt)
+			continue;
+
+		rel_path = get_relative_path(detached->ns_mountpoint, mi->ns_mountpoint);
+		if (!rel_path) {
+			pr_err("Child-parent mountpoint mismatch for detached mount %d:%s %d:%s\n", detached->mnt_id, detached->ns_mountpoint,
+			       mi->mnt_id, mi->ns_mountpoint);
+			return -1;
+		}
+		snprintf(mountpoint, sizeof(mountpoint), "%s%s%s", mi->plain_mountpoint, rel_path[0] ? "/" : "",
+			 rel_path);
+
+		/* create a dir at this mountpoint */
+		if (mkdir(mountpoint, 0700)) {
+			pr_perror("could not create temporary dir at mountpoint: %s", mountpoint);
+			return -1;
+		}
+	}
 
 	return 0;
 }

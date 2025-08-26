@@ -2158,6 +2158,10 @@ skip_ns_bouncing:
 	if (ret < 0)
 		goto out_kill;
 
+	ret = umount_detached_mountpoints();
+	if (ret < 0)
+		goto out_kill;
+
 	ret = stop_usernsd();
 	if (ret < 0)
 		goto out_kill;

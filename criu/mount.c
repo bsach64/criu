@@ -368,10 +368,14 @@ static struct mount_info *mnt_build_ids_tree(struct mount_info *list)
 
 		pr_debug("\t\tWorking on %d->%d\n", m->mnt_id, m->parent_mnt_id);
 
-		if (m->mnt_id != m->parent_mnt_id)
+		if (m->mnt_id != m->parent_mnt_id) {
 			parent = __lookup_mnt_id(list, m->parent_mnt_id);
-		else /* a circular mount reference. It's rootfs or smth like it. */
+		} else /* a circular mount reference. It's rootfs or detached mount or smth like it. */ {
+			if (m->detached_mnt)
+				continue;
+
 			parent = NULL;
+		}
 
 		if (!parent) {
 			/* Only a root mount can be without parent */
@@ -391,6 +395,15 @@ static struct mount_info *mnt_build_ids_tree(struct mount_info *list)
 	if (!root) {
 		pr_err("No root found for tree\n");
 		return NULL;
+	}
+
+	for (m = list; m; m = m->next) {
+		if (!m->detached_mnt)
+			continue;
+
+		m->parent = root;
+		m->parent_mnt_id = root->mnt_id;
+		list_add_tail(&m->siblings, &root->children);
 	}
 
 	return root;
@@ -3298,6 +3311,9 @@ static int collect_mnt_from_image(struct mount_info **head, struct mount_info **
 		if (me->has_internal_sharing)
 			pm->internal_sharing = me->internal_sharing;
 
+		if (me->has_detached_mnt)
+			pm->detached_mnt = me->detached_mnt;
+
 		pm->source = xstrdup(me->source);
 		if (!pm->source)
 			goto err;
@@ -4294,7 +4310,6 @@ static int statmount(struct mnt_id_req *req, struct statmount *stmnt, size_t buf
 struct mount_info* mount_info_from_statmount(int lfd)
 {
 	size_t statmount_bufsize = 1 << 15;
-	size_t root_len;
 	int ret;
 	char *options;
 	struct mount_info *cur, *mnt;
@@ -4401,21 +4416,19 @@ struct mount_info* mount_info_from_statmount(int lfd)
 		mnt_entry_free(mnt);
 		return NULL;
 	}
-	root_len = strlen(mnt->root);
 
-	/*
-	 * TODO: keeping ns_mountpoint same as root for now,
-	 * do not know if it's the right approach
-	 */
-	mnt->ns_mountpoint = xmalloc(root_len + 2);
+	/* Create a temporary fake mountpoint, which we will use on restore */
+	mnt->ns_mountpoint = xstrdup("./.criu.detached.XXXXXX");
 	if (!mnt->ns_mountpoint) {
 		mnt_entry_free(mnt);
 		return NULL;
 	}
 
-	mnt->ns_mountpoint[0] = '.';
-	strncpy(mnt->ns_mountpoint + 1, mnt->root, root_len);
-	mnt->ns_mountpoint[root_len + 1] = 0;
+	mnt->ns_mountpoint = mkdtemp(mnt->ns_mountpoint);
+	if (!mnt->ns_mountpoint) {
+		mnt_entry_free(mnt);
+		return NULL;
+	}
 
 	/* check whether this is bind mount of a normal mount */
 	for (cur = mntinfo; cur; cur = cur->next) {

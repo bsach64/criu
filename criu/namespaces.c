@@ -1,5 +1,7 @@
+#include "common/list.h"
 #include "common/lock.h"
 #include "log.h"
+#include <sys/mount.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -1578,6 +1580,65 @@ static int exit_usernsd(void *arg, int fd, pid_t pid)
 	pr_info("uns: `- daemon exits w/ %d\n", code);
 	exit(code);
 }
+
+int umount_detached_mountpoints(void)
+{
+	int ret = 0;
+	int orig_nsfd, nsfd;
+	struct ns_id *nsid;
+	struct mount_info *mnt;
+
+	orig_nsfd = open_proc(PROC_SELF, "ns/mnt");
+	if (orig_nsfd < 0) {
+		pr_err("failed to get original mount namespace fd\n");
+		return -1;
+	}
+
+	for (nsid = ns_ids; nsid; nsid = nsid->next) {
+		if (nsid->nd != &mnt_ns_desc)
+			continue;
+
+		nsfd = fdstore_get(nsid->mnt.nsfd_id);
+		if (nsfd < 0) {
+			pr_err("failed to get mount namespace fd\n");
+			ret = -1;
+			goto out;
+		}
+
+		if (switch_ns_by_fd(nsfd, &mnt_ns_desc, &orig_nsfd)) {
+			pr_err("failed to switch to mount namespace\n");
+			ret = -1;
+			goto out;
+		}
+
+		for (mnt = mntinfo; mnt; mnt = mnt->next) {
+			if (!mnt->detached_mnt || mnt->nsid != nsid)
+				continue;
+
+			if (umount2(mnt->ns_mountpoint, MNT_DETACH)) {
+				pr_perror("failed to umount detached mountpoint: %s", mnt->ns_mountpoint);
+				ret = -1;
+				goto out;
+			}
+
+			if (rmdir(mnt->ns_mountpoint)) {
+				pr_perror("failed to remove temporary directory for detached mount: %s", mnt->ns_mountpoint);
+				ret = -1;
+				goto out;
+			}
+		}
+
+		close(nsfd);
+	}
+out:
+	if (restore_ns(orig_nsfd, &mnt_ns_desc)) {
+		pr_perror("failed to restore original mount namespace");
+		ret = -1;
+	}
+	close(orig_nsfd);
+	return ret;
+}
+
 
 int stop_usernsd(void)
 {

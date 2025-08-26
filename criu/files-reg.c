@@ -1,4 +1,3 @@
-#include "log.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -1823,7 +1822,21 @@ int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 	/* skipping for detached */
 	if (!skip_for_shell_job && !mi->detached_mnt && check_path_remap(link, p, lfd, id, mi->nsid))
 		return -1;
-	rfe.name = &link->name[1];
+
+
+	/*
+	 * TODO: need to add lot's of checks
+	 * extremely hacky path changing for detached mounts
+	 */
+	if (mi->detached_mnt) {
+		rfe.name = xmalloc(PATH_MAX);
+		if (!rfe.name)
+			return -1;
+
+		snprintf(rfe.name, PATH_MAX, "%s%s", &mi->ns_mountpoint[1], &link->name[1]);
+	} else {
+		rfe.name = &link->name[1];
+	}
 ext:
 	rfe.id = id;
 	rfe.flags = p->flags;
