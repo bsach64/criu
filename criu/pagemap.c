@@ -604,7 +604,6 @@ static int process_async_reads(struct page_read *pr)
 	list_for_each_entry_safe(piov, n, &pr->async, l) {
 		ssize_t bytes;
 		struct iovec *iovs = piov->to;
-		bool io_failed = false;
 
 		pr_debug("Read piov iovs %d, from %ju, len %ju, first %p:%zu\n", piov->nr, piov->from,
 			 piov->end - piov->from, piov->to->iov_base, piov->to->iov_len);
@@ -627,11 +626,13 @@ static int process_async_reads(struct page_read *pr)
 		if (bytes < 0) {
 			pr_err("Can't read async pr bytes (%zd / %ju read, %ju off, %d iovs)\n", bytes,
 			       piov->end - piov->from, piov->from, piov->nr);
-			io_failed = true;
+			ret = -1;
+			goto cleanup;
 		} else if (bytes == 0) {
 			pr_err("Unexpected EOF in async page read (%ju bytes remaining at off %ju, %d iovs)\n",
 			       piov->end - piov->from, piov->from, piov->nr);
-			io_failed = true;
+			ret = -1;
+			goto cleanup;
 		} else {
 			/*
 			 * O_DIRECT requires page-aligned retry. Mask
@@ -645,18 +646,20 @@ static int process_async_reads(struct page_read *pr)
 
 				if (aligned == 0) {
 					pr_err("Sub-page short read on O_DIRECT fd: %zd bytes\n", bytes);
-					io_failed = true;
+					ret = -1;
+					goto cleanup;
 				} else {
 					bytes = aligned;
 				}
 			}
 
-			if (!io_failed && opts.auto_dedup &&
-			    punch_hole(pr, piov->from, bytes, false))
-				io_failed = true;
+			if (opts.auto_dedup && punch_hole(pr, piov->from, bytes, false)) {
+				ret = -1;
+				goto cleanup;
+			}
 		}
 
-		if (!io_failed && bytes != piov->end - piov->from) {
+		if (bytes != piov->end - piov->from) {
 			/*
 			 * The preadv() can return less than requested. It's
 			 * valid and doesn't mean error or EOF. We should advance
@@ -670,19 +673,15 @@ static int process_async_reads(struct page_read *pr)
 			goto more;
 		}
 
-		if (io_failed) {
-			list_del(&piov->l);
-			xfree(iovs);
-			xfree(piov);
-			drain_async_queue(pr);
-			return -1;
-		}
-
 		BUG_ON(pr->io_complete); /* FIXME -- implement once needed */
-
+cleanup:
 		list_del(&piov->l);
 		xfree(iovs);
 		xfree(piov);
+		if (ret < 0) {
+			drain_async_queue(pr);
+			return -1;
+		}
 	}
 
 	if (pr->parent)
