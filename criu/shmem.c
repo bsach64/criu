@@ -478,7 +478,9 @@ static int shmem_restore_async(struct page_read *pr, void *addr, unsigned long s
 		unsigned nr_pages;
 
 		ret = pr->advance(pr);
-		if (ret <= 0)
+		if (ret < 0)
+			goto err;
+		if (ret == 0)
 			break;
 
 		vaddr = (unsigned long)decode_pointer(pr->pe->vaddr);
@@ -486,23 +488,18 @@ static int shmem_restore_async(struct page_read *pr, void *addr, unsigned long s
 
 		if (vaddr + nr_pages * PAGE_SIZE > size) {
 			pr_err("Shmem read out of bounds: %lx + %lu > %lx\n", vaddr, (unsigned long)nr_pages * PAGE_SIZE, size);
-			pr->sync(pr); /* drain async queue before close */
-			return -1;
+			goto err;
 		}
 
 		ret = pr->read_pages(pr, vaddr, nr_pages, addr + vaddr, PR_ASYNC);
-		if (ret < 0) {
-			pr->sync(pr); /* drain async queue before close */
-			return -1;
-		}
-	}
-
-	if (ret < 0) {
-		pr->sync(pr); /* drain async queue before close */
-		return -1;
+		if (ret < 0)
+			goto err;
 	}
 
 	return pr->sync(pr);
+err:
+	pr->sync(pr); /* drain async queue before close */
+	return -1;
 }
 
 static int restore_shmem_content_from_pages(void *addr, unsigned long size, unsigned long shmid)
