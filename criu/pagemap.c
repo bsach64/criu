@@ -28,6 +28,9 @@
 
 #define MAX_BUNCH_SIZE 256
 
+#define OFF_MAX (sizeof(off_t) == sizeof(long long) ? LLONG_MAX : sizeof(off_t) == sizeof(int) ? INT_MAX : -999999)
+#define OFF_MIN (sizeof(off_t) == sizeof(long long) ? LLONG_MIN : sizeof(off_t) == sizeof(int) ? INT_MIN : -999999)
+
 /*
  * One "job" for the preadv() syscall in pagemap.c
  */
@@ -584,24 +587,15 @@ static int process_async_reads(struct page_read *pr)
 {
 	int fd, ret = 0;
 	struct page_read_iov *piov, *n;
-	off_t first_off = 0, last_end = 0;
-	bool have_range = false;
+	off_t first_off = OFF_MAX, last_end = OFF_MIN;
 
 	fd = img_raw_fd(pr->pi);
 	if (!pr->use_direct) {
 		list_for_each_entry(piov, &pr->async, l) {
-			if (!have_range) {
-				first_off = piov->from;
-				last_end = piov->end;
-				have_range = true;
-			} else {
-				if (piov->from < first_off)
-					first_off = piov->from;
-				if (piov->end > last_end)
-					last_end = piov->end;
-			}
+			first_off = min(piov->from, first_off);
+			last_end = max(piov->end, last_end);
 		}
-		if (have_range && last_end > first_off) {
+		if (last_end > first_off) {
 			if (posix_fadvise(fd, first_off, (off_t)(last_end - first_off), POSIX_FADV_WILLNEED) != 0)
 				pr_debug("posix_fadvise(WILLNEED) failed for async range\n");
 		}
